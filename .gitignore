@@ -1,0 +1,27 @@
+# datasets
+data/
+*.hdr
+*.exr
+*.tif
+*.tiff
+
+# checkpoints and pretrained models
+checkpoints/
+*.pth
+*.pt
+*.ckpt
+
+# results
+results/
+outputs/
+logs/
+runs/
+wandb/
+
+# python
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# system
+.DS_Store.vscode/
