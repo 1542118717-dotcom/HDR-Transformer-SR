@@ -13,6 +13,7 @@ if REPO_ROOT not in sys.path:
 
 from dataset.dataset_sig17_sr import SIG17_SR_Training_Dataset
 from models.hdr_transformer_sr import HDRTransformerSR
+from train_sr import crop_sr_batch_to_window
 
 
 def parse_args():
@@ -21,6 +22,7 @@ def parse_args():
     parser.add_argument('--height', type=int, default=64, help='synthetic LR input height')
     parser.add_argument('--width', type=int, default=64, help='synthetic LR input width')
     parser.add_argument('--scale', type=int, default=2, help='super-resolution scale factor')
+    parser.add_argument('--window_size', type=int, default=8, help='HDRTransformer window size for LR input cropping')
     parser.add_argument('--dataset_dir', type=str, default='./data', help='SIG17/Kalantari17 dataset root directory')
     parser.add_argument('--sub_set', type=str, default='sig17_training_crop128_stride64', help='training subset directory')
     parser.add_argument('--index', type=int, default=0, help='dataset sample index for non-quick mode')
@@ -78,6 +80,10 @@ def main():
         input0, input1, input2, label = synthetic_batch(args, device)
     else:
         input0, input1, input2, label = dataset_batch(args, device)
+
+    input0, input1, input2, label = crop_sr_batch_to_window(
+        input0, input1, input2, label, window_size=args.window_size, scale=args.scale
+    )
 
     with torch.no_grad():
         output = model(input0, input1, input2)
