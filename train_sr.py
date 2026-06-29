@@ -23,6 +23,7 @@ def get_args():
     parser.add_argument('--dataset_dir', type=str, default='./data', help='SIG17/Kalantari17 dataset root directory')
     parser.add_argument('--sub_set', type=str, default='sig17_training_crop128_stride64', help='training subset directory')
     parser.add_argument('--scale', type=int, default=2, help='super-resolution scale factor')
+    parser.add_argument('--window_size', type=int, default=8, help='HDRTransformer window size for LR input cropping')
     parser.add_argument('--crop_size', type=int, default=512, help='validation crop size before downsampling')
     parser.add_argument('--save_dir', type=str, default='./checkpoints_sr', help='directory for HDR-SR checkpoints')
     parser.add_argument('--num_workers', type=int, default=8, metavar='N', help='number of dataloader workers')
@@ -49,6 +50,54 @@ def assert_output_label_shape(output, label, stage):
                 stage, tuple(output.shape), tuple(label.shape)
             )
         )
+
+
+def crop_sr_batch_to_window(input0, input1, input2, label, window_size=8, scale=2):
+    """Crop an HDR-SR batch so LR inputs are divisible by the transformer window.
+
+    The three LDR inputs are LR tensors with shape ``[B, 6, H, W]``. The HDR
+    label is the aligned HR tensor with shape ``[B, 3, scale * H, scale * W]``.
+    This function only crops spatial dimensions and preserves all tensor values
+    within the retained top-left aligned region.
+    """
+    if window_size <= 0:
+        raise ValueError('window_size must be positive, got {}'.format(window_size))
+    if scale <= 0:
+        raise ValueError('scale must be positive, got {}'.format(scale))
+
+    lr_height, lr_width = input0.shape[-2], input0.shape[-1]
+    for name, tensor in (('input1', input1), ('input2', input2)):
+        if tensor.shape[-2:] != (lr_height, lr_width):
+            raise RuntimeError(
+                '{} LR shape {} does not match input0 LR shape {}'.format(
+                    name, tuple(tensor.shape[-2:]), (lr_height, lr_width)
+                )
+            )
+
+    lr_crop_height = (lr_height // window_size) * window_size
+    lr_crop_width = (lr_width // window_size) * window_size
+    if lr_crop_height == 0 or lr_crop_width == 0:
+        raise RuntimeError(
+            'LR input shape {} is too small for window_size {}'.format(
+                (lr_height, lr_width), window_size
+            )
+        )
+
+    hr_crop_height = lr_crop_height * scale
+    hr_crop_width = lr_crop_width * scale
+    if label.shape[-2] < hr_crop_height or label.shape[-1] < hr_crop_width:
+        raise RuntimeError(
+            'Label HR shape {} is smaller than required aligned crop {}'.format(
+                tuple(label.shape[-2:]), (hr_crop_height, hr_crop_width)
+            )
+        )
+
+    return (
+        input0[..., :lr_crop_height, :lr_crop_width],
+        input1[..., :lr_crop_height, :lr_crop_width],
+        input2[..., :lr_crop_height, :lr_crop_width],
+        label[..., :hr_crop_height, :hr_crop_width],
+    )
 
 
 def adjust_learning_rate(args, optimizer, epoch):
@@ -78,6 +127,9 @@ def train(args, model, device, train_loader, optimizer, epoch, criterion):
         input1 = batch_data['input1'].to(device)
         input2 = batch_data['input2'].to(device)
         label = batch_data['label'].to(device)
+        input0, input1, input2, label = crop_sr_batch_to_window(
+            input0, input1, input2, label, window_size=args.window_size, scale=args.scale
+        )
 
         output = model(input0, input1, input2)
         assert_output_label_shape(output, label, 'train')
@@ -117,6 +169,9 @@ def validate(args, model, device, val_loader, optimizer, epoch, criterion, best_
             input1 = batch_data['input1'].to(device)
             input2 = batch_data['input2'].to(device)
             label = batch_data['label'].to(device)
+            input0, input1, input2, label = crop_sr_batch_to_window(
+                input0, input1, input2, label, window_size=args.window_size, scale=args.scale
+            )
 
             output = model(input0, input1, input2)
             assert_output_label_shape(output, label, 'validation')
@@ -212,6 +267,7 @@ def main():
         Dataset dir:     {}
         Subset:          {}
         Scale:           {}
+        Window size:     {}
         Epochs:          {}
         Batch size:      {}
         Loss function:   {}
@@ -223,6 +279,7 @@ def main():
             args.dataset_dir,
             args.sub_set,
             args.scale,
+            args.window_size,
             args.epochs,
             args.batch_size,
             args.loss_func,
