@@ -40,6 +40,8 @@ def get_args():
     parser.add_argument('--batch_size', type=int, default=16, metavar='N', help='training batch size')
     parser.add_argument('--test_batch_size', type=int, default=1, metavar='N', help='validation batch size')
     parser.add_argument('--log_interval', type=int, default=200, metavar='N', help='batches between train logs')
+    parser.add_argument('--max_train_batches', type=int, default=None, help='maximum training batches per epoch for smoke tests')
+    parser.add_argument('--max_val_batches', type=int, default=None, help='maximum validation batches per epoch for smoke tests')
     return parser.parse_args()
 
 
@@ -122,6 +124,8 @@ def train(args, model, device, train_loader, optimizer, epoch, criterion):
     end = time.time()
 
     for batch_idx, batch_data in enumerate(train_loader):
+        if args.max_train_batches is not None and batch_idx >= args.max_train_batches:
+            break
         data_time.update(time.time() - end)
         input0 = batch_data['input0'].to(device)
         input1 = batch_data['input1'].to(device)
@@ -164,7 +168,9 @@ def validate(args, model, device, val_loader, optimizer, epoch, criterion, best_
     val_loss = AverageMeter()
 
     with torch.no_grad():
-        for batch_data in val_loader:
+        for batch_idx, batch_data in enumerate(val_loader):
+            if args.max_val_batches is not None and batch_idx >= args.max_val_batches:
+                break
             input0 = batch_data['input0'].to(device)
             input1 = batch_data['input1'].to(device)
             input2 = batch_data['input2'].to(device)
