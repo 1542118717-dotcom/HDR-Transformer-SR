@@ -82,22 +82,71 @@ def tensor_shape(tensor):
     return tuple(tensor.shape)
 
 
+def to_chw_numpy(tensor):
+    """Convert a BCHW tensor with batch size 1 to a CHW float32 numpy array."""
+    chw = tensor.squeeze(0).detach().cpu().numpy().astype(np.float32)
+    if chw.ndim != 3:
+        raise ValueError('Expected CHW tensor after squeezing batch dimension, got shape {}'.format(chw.shape))
+    return chw
+
+
+def first_three_channels(chw_image, image_name):
+    """Return the first three channels from a CHW image for RGB visualization."""
+    if chw_image.shape[0] < 3:
+        raise ValueError('{} must have at least 3 channels for visualization, got shape {}'.format(image_name, chw_image.shape))
+    return chw_image[:3]
+
+
 def tonemap_to_uint8(chw_hdr):
-    """Convert a CHW HDR prediction to a viewable HWC uint8 image."""
-    hwc = np.transpose(chw_hdr, (1, 2, 0))
+    """Convert a CHW HDR image to a viewable HWC uint8 image using range_compressor."""
+    chw_rgb = first_three_channels(chw_hdr, 'tonemap input')
+    hwc = np.transpose(chw_rgb, (1, 2, 0))
     mapped = range_compressor(np.maximum(hwc, 0.0))
     return np.clip(mapped * 255.0, 0.0, 255.0).astype(np.uint8)
 
 
-def save_outputs(save_dir, sample_index, output):
+def save_rgb_png(path, rgb_image):
+    cv2.imwrite(path, cv2.cvtColor(rgb_image, cv2.COLOR_RGB2BGR))
+
+
+def resize_rgb_to_shape(rgb_image, target_height, target_width):
+    """Resize an HWC RGB image for side-by-side visualization when needed."""
+    if rgb_image.shape[:2] == (target_height, target_width):
+        return rgb_image
+    return cv2.resize(rgb_image, (target_width, target_height), interpolation=cv2.INTER_CUBIC)
+
+
+def save_outputs(save_dir, sample_index, input1, output, label):
     os.makedirs(save_dir, exist_ok=True)
-    output_np = output.squeeze(0).detach().cpu().numpy().astype(np.float32)
+    input1_np = to_chw_numpy(input1)
+    output_np = to_chw_numpy(output)
+    label_np = to_chw_numpy(label)
+
+    if output_np.shape != label_np.shape:
+        raise RuntimeError(
+            'Output shape {} does not match label shape {} for sample {}'.format(
+                output_np.shape, label_np.shape, sample_index
+            )
+        )
+
     npy_path = osp.join(save_dir, 'sample_{:04d}_output.npy'.format(sample_index))
-    png_path = osp.join(save_dir, 'sample_{:04d}_output_tonemap.png'.format(sample_index))
+    output_png_path = osp.join(save_dir, 'sample_{:04d}_output_tonemap.png'.format(sample_index))
+    label_png_path = osp.join(save_dir, 'sample_{:04d}_label_tonemap.png'.format(sample_index))
+    input1_png_path = osp.join(save_dir, 'sample_{:04d}_input1_tonemap.png'.format(sample_index))
+    comparison_png_path = osp.join(save_dir, 'sample_{:04d}_comparison.png'.format(sample_index))
+
     np.save(npy_path, output_np)
-    png_rgb = tonemap_to_uint8(output_np)
-    cv2.imwrite(png_path, cv2.cvtColor(png_rgb, cv2.COLOR_RGB2BGR))
-    return npy_path, png_path
+    input1_rgb = tonemap_to_uint8(input1_np)
+    output_rgb = tonemap_to_uint8(output_np)
+    label_rgb = tonemap_to_uint8(label_np)
+    input1_comparison_rgb = resize_rgb_to_shape(input1_rgb, output_rgb.shape[0], output_rgb.shape[1])
+    comparison_rgb = np.concatenate([input1_comparison_rgb, output_rgb, label_rgb], axis=1)
+
+    save_rgb_png(output_png_path, output_rgb)
+    save_rgb_png(label_png_path, label_rgb)
+    save_rgb_png(input1_png_path, input1_rgb)
+    save_rgb_png(comparison_png_path, comparison_rgb)
+    return npy_path, output_png_path, label_png_path, input1_png_path, comparison_png_path
 
 
 def prepare_sample(dataset, index, args, device):
@@ -163,8 +212,8 @@ def run_inference(args):
                         tuple(output.shape), tuple(label.shape), sample_index
                     )
                 )
-            npy_path, png_path = save_outputs(args.save_dir, sample_index, output)
-            print('Saved: {} and {}'.format(npy_path, png_path))
+            saved_paths = save_outputs(args.save_dir, sample_index, input1, output, label)
+            print('Saved: {}'.format(', '.join(saved_paths)))
 
 
 def main():
