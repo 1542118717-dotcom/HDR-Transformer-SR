@@ -24,6 +24,8 @@ def get_args():
     parser.add_argument('--sub_set', type=str, default='sig17_training_crop128_stride64', help='training subset directory')
     parser.add_argument('--scale', type=int, default=2, help='super-resolution scale factor')
     parser.add_argument('--window_size', type=int, default=8, help='HDRTransformer window size for LR input cropping')
+    parser.add_argument('--train_lr_patch_size', type=int, default=64, help='LR patch size used for training crops')
+    parser.add_argument('--val_lr_patch_size', type=int, default=64, help='LR patch size used for validation crops')
     parser.add_argument('--crop_size', type=int, default=512, help='validation crop size before downsampling')
     parser.add_argument('--save_dir', type=str, default='./checkpoints_sr', help='directory for HDR-SR checkpoints')
     parser.add_argument('--num_workers', type=int, default=8, metavar='N', help='number of dataloader workers')
@@ -54,18 +56,43 @@ def assert_output_label_shape(output, label, stage):
         )
 
 
-def crop_sr_batch_to_window(input0, input1, input2, label, window_size=8, scale=2):
-    """Crop an HDR-SR batch so LR inputs are divisible by the transformer window.
+def validate_lr_patch_size(patch_size, window_size, stage):
+    if patch_size <= 0:
+        raise ValueError('{} LR patch size must be positive, got {}'.format(stage, patch_size))
+    if window_size <= 0:
+        raise ValueError('window_size must be positive, got {}'.format(window_size))
+    if patch_size % window_size != 0:
+        raise ValueError(
+            '{} LR patch size ({}) must be divisible by window_size ({})'.format(
+                stage, patch_size, window_size
+            )
+        )
+
+
+def crop_sr_batch_to_window(input0, input1, input2, label, window_size=8, scale=2, patch_size=None, random_crop=False):
+    """Crop an HDR-SR batch to an LR patch aligned with the HR label.
 
     The three LDR inputs are LR tensors with shape ``[B, 6, H, W]``. The HDR
     label is the aligned HR tensor with shape ``[B, 3, scale * H, scale * W]``.
-    This function only crops spatial dimensions and preserves all tensor values
-    within the retained top-left aligned region.
+    When ``patch_size`` is provided, LR inputs are cropped to
+    ``[B, 6, patch_size, patch_size]`` and labels to
+    ``[B, 3, patch_size * scale, patch_size * scale]``. Otherwise this keeps
+    the previous behavior of cropping to the largest top-left LR region whose
+    dimensions are divisible by ``window_size``.
     """
     if window_size <= 0:
         raise ValueError('window_size must be positive, got {}'.format(window_size))
     if scale <= 0:
         raise ValueError('scale must be positive, got {}'.format(scale))
+    if patch_size is not None:
+        if patch_size <= 0:
+            raise ValueError('LR patch size must be positive, got {}'.format(patch_size))
+        if patch_size % window_size != 0:
+            raise ValueError(
+                'LR patch size ({}) must be divisible by window_size ({})'.format(
+                    patch_size, window_size
+                )
+            )
 
     lr_height, lr_width = input0.shape[-2], input0.shape[-1]
     for name, tensor in (('input1', input1), ('input2', input2)):
@@ -76,29 +103,49 @@ def crop_sr_batch_to_window(input0, input1, input2, label, window_size=8, scale=
                 )
             )
 
-    lr_crop_height = (lr_height // window_size) * window_size
-    lr_crop_width = (lr_width // window_size) * window_size
-    if lr_crop_height == 0 or lr_crop_width == 0:
-        raise RuntimeError(
-            'LR input shape {} is too small for window_size {}'.format(
-                (lr_height, lr_width), window_size
+    if patch_size is None:
+        lr_crop_height = (lr_height // window_size) * window_size
+        lr_crop_width = (lr_width // window_size) * window_size
+        if lr_crop_height == 0 or lr_crop_width == 0:
+            raise RuntimeError(
+                'LR input shape {} is too small for window_size {}'.format(
+                    (lr_height, lr_width), window_size
+                )
             )
-        )
+        lr_top = 0
+        lr_left = 0
+    else:
+        lr_crop_height = patch_size
+        lr_crop_width = patch_size
+        if lr_height < patch_size or lr_width < patch_size:
+            raise RuntimeError(
+                'LR input shape {} is smaller than requested patch size {}'.format(
+                    (lr_height, lr_width), patch_size
+                )
+            )
+        if random_crop:
+            lr_top = torch.randint(0, lr_height - patch_size + 1, (1,), device=input0.device).item()
+            lr_left = torch.randint(0, lr_width - patch_size + 1, (1,), device=input0.device).item()
+        else:
+            lr_top = (lr_height - patch_size) // 2
+            lr_left = (lr_width - patch_size) // 2
 
+    hr_top = lr_top * scale
+    hr_left = lr_left * scale
     hr_crop_height = lr_crop_height * scale
     hr_crop_width = lr_crop_width * scale
-    if label.shape[-2] < hr_crop_height or label.shape[-1] < hr_crop_width:
+    if label.shape[-2] < hr_top + hr_crop_height or label.shape[-1] < hr_left + hr_crop_width:
         raise RuntimeError(
-            'Label HR shape {} is smaller than required aligned crop {}'.format(
-                tuple(label.shape[-2:]), (hr_crop_height, hr_crop_width)
+            'Label HR shape {} is smaller than required aligned crop at {} with size {}'.format(
+                tuple(label.shape[-2:]), (hr_top, hr_left), (hr_crop_height, hr_crop_width)
             )
         )
 
     return (
-        input0[..., :lr_crop_height, :lr_crop_width],
-        input1[..., :lr_crop_height, :lr_crop_width],
-        input2[..., :lr_crop_height, :lr_crop_width],
-        label[..., :hr_crop_height, :hr_crop_width],
+        input0[..., lr_top:lr_top + lr_crop_height, lr_left:lr_left + lr_crop_width],
+        input1[..., lr_top:lr_top + lr_crop_height, lr_left:lr_left + lr_crop_width],
+        input2[..., lr_top:lr_top + lr_crop_height, lr_left:lr_left + lr_crop_width],
+        label[..., hr_top:hr_top + hr_crop_height, hr_left:hr_left + hr_crop_width],
     )
 
 
@@ -132,7 +179,14 @@ def train(args, model, device, train_loader, optimizer, epoch, criterion):
         input2 = batch_data['input2'].to(device)
         label = batch_data['label'].to(device)
         input0, input1, input2, label = crop_sr_batch_to_window(
-            input0, input1, input2, label, window_size=args.window_size, scale=args.scale
+            input0,
+            input1,
+            input2,
+            label,
+            window_size=args.window_size,
+            scale=args.scale,
+            patch_size=args.train_lr_patch_size,
+            random_crop=True,
         )
 
         output = model(input0, input1, input2)
@@ -176,7 +230,14 @@ def validate(args, model, device, val_loader, optimizer, epoch, criterion, best_
             input2 = batch_data['input2'].to(device)
             label = batch_data['label'].to(device)
             input0, input1, input2, label = crop_sr_batch_to_window(
-                input0, input1, input2, label, window_size=args.window_size, scale=args.scale
+                input0,
+                input1,
+                input2,
+                label,
+                window_size=args.window_size,
+                scale=args.scale,
+                patch_size=args.val_lr_patch_size,
+                random_crop=False,
             )
 
             output = model(input0, input1, input2)
@@ -202,6 +263,9 @@ def validate(args, model, device, val_loader, optimizer, epoch, criterion, best_
 
 def main():
     args = get_args()
+    validate_lr_patch_size(args.train_lr_patch_size, args.window_size, 'Training')
+    validate_lr_patch_size(args.val_lr_patch_size, args.window_size, 'Validation')
+
     if args.seed is not None:
         set_random_seed(args.seed)
     os.makedirs(args.save_dir, exist_ok=True)
@@ -274,6 +338,8 @@ def main():
         Subset:          {}
         Scale:           {}
         Window size:     {}
+        Train LR patch:  {}
+        Val LR patch:    {}
         Epochs:          {}
         Batch size:      {}
         Loss function:   {}
@@ -286,6 +352,8 @@ def main():
             args.sub_set,
             args.scale,
             args.window_size,
+            args.train_lr_patch_size,
+            args.val_lr_patch_size,
             args.epochs,
             args.batch_size,
             args.loss_func,
