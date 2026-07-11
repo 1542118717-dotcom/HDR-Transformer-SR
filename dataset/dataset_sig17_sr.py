@@ -75,21 +75,82 @@ class _SIG17SRMixin(object):
 class SIG17_SR_Training_Dataset(_SIG17SRMixin, Dataset):
     """Training split for LR-LDR to HR-HDR super-resolution experiments."""
 
-    def __init__(self, root_dir, sub_set, is_training=True, scale=2):
+    def __init__(self, root_dir, sub_set, is_training=True, scale=2,
+                 scene_list_file=None):
         self.root_dir = root_dir
         self.is_training = is_training
         self.sub_set = sub_set
         self.scale = scale
+        self.scene_list_file = scene_list_file
 
         self.scenes_dir = osp.join(root_dir, self.sub_set)
-        self.scenes_list = sorted(os.listdir(self.scenes_dir))
+        if self.scene_list_file is None:
+            self.scenes_list = sorted(os.listdir(self.scenes_dir))
+        else:
+            self.scenes_list = self._read_scene_list(self.scene_list_file)
 
         self.image_list = []
-        for scene in range(len(self.scenes_list)):
-            exposure_file_path = os.path.join(self.scenes_dir, self.scenes_list[scene], 'exposure.txt')
-            ldr_file_path = list_all_files_sorted(os.path.join(self.scenes_dir, self.scenes_list[scene]), '.tif')
-            label_path = os.path.join(self.scenes_dir, self.scenes_list[scene])
+        for scene_name in self.scenes_list:
+            scene_dir = os.path.join(self.scenes_dir, scene_name)
+            exposure_file_path = os.path.join(scene_dir, 'exposure.txt')
+            ldr_file_path = list_all_files_sorted(scene_dir, '.tif')
+            label_path = scene_dir
+
+            if self.scene_list_file is not None:
+                self._validate_scene_files(
+                    scene_name, scene_dir, exposure_file_path, ldr_file_path
+                )
+
             self.image_list += [[exposure_file_path, ldr_file_path, label_path]]
+
+    @staticmethod
+    def _read_scene_list(scene_list_file):
+        if not osp.isfile(scene_list_file):
+            raise FileNotFoundError(
+                'Scene list file does not exist: {}'.format(scene_list_file)
+            )
+
+        with open(scene_list_file, 'r') as f:
+            scenes = [line.strip() for line in f if line.strip()]
+
+        if not scenes:
+            raise ValueError(
+                'Scene list file is empty after ignoring blank lines: {}'.format(
+                    scene_list_file
+                )
+            )
+        return scenes
+
+    @staticmethod
+    def _validate_scene_files(scene_name, scene_dir, exposure_file_path, ldr_file_path):
+        if not osp.isdir(scene_dir):
+            raise FileNotFoundError(
+                'Scene "{}" does not exist under dataset subset: {}'.format(
+                    scene_name, scene_dir
+                )
+            )
+
+        if not osp.isfile(exposure_file_path):
+            raise FileNotFoundError(
+                'Scene "{}" is missing exposure.txt: {}'.format(
+                    scene_name, exposure_file_path
+                )
+            )
+
+        label_file_path = osp.join(scene_dir, 'label.hdr')
+        if not osp.isfile(label_file_path):
+            raise FileNotFoundError(
+                'Scene "{}" is missing label.hdr: {}'.format(
+                    scene_name, label_file_path
+                )
+            )
+
+        if len(ldr_file_path) != 3:
+            raise FileNotFoundError(
+                'Scene "{}" must contain exactly three .tif images, found {}: {}'.format(
+                    scene_name, len(ldr_file_path), scene_dir
+                )
+            )
 
     def __getitem__(self, index):
         # Exposure reading is intentionally identical to the original dataset.
