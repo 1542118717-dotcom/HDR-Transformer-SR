@@ -44,6 +44,8 @@ def get_args():
     parser.add_argument('--log_interval', type=int, default=200, metavar='N', help='batches between train logs')
     parser.add_argument('--max_train_batches', type=int, default=None, help='maximum training batches per epoch for smoke tests')
     parser.add_argument('--max_val_batches', type=int, default=None, help='maximum validation batches per epoch for smoke tests')
+    parser.add_argument('--train_scene_list_file', type=str, default=None, help='optional training scene list file')
+    parser.add_argument('--val_scene_list_file', type=str, default=None, help='optional validation scene list file from the training subset')
     return parser.parse_args()
 
 
@@ -261,6 +263,35 @@ def validate(args, model, device, val_loader, optimizer, epoch, criterion, best_
             f.write('Validation set: Average PSNR: {:.4f}, PSNR_mu_law: {:.4f}\n'.format(val_psnr.avg, val_mu_psnr.avg))
 
 
+def build_datasets(args):
+    train_dataset = SIG17_SR_Training_Dataset(
+        root_dir=args.dataset_dir,
+        sub_set=args.sub_set,
+        is_training=True,
+        scale=args.scale,
+        scene_list_file=args.train_scene_list_file,
+    )
+
+    if args.val_scene_list_file is not None:
+        val_dataset = SIG17_SR_Training_Dataset(
+            root_dir=args.dataset_dir,
+            sub_set=args.sub_set,
+            is_training=False,
+            scale=args.scale,
+            scene_list_file=args.val_scene_list_file,
+        )
+    else:
+        val_dataset = SIG17_SR_Validation_Dataset(
+            root_dir=args.dataset_dir,
+            is_training=False,
+            crop=True,
+            crop_size=args.crop_size,
+            scale=args.scale,
+        )
+
+    return train_dataset, val_dataset
+
+
 def main():
     args = get_args()
     validate_lr_patch_size(args.train_lr_patch_size, args.window_size, 'Training')
@@ -304,19 +335,7 @@ def main():
         else:
             raise FileNotFoundError('No checkpoint found at {}'.format(args.resume))
 
-    train_dataset = SIG17_SR_Training_Dataset(
-        root_dir=args.dataset_dir,
-        sub_set=args.sub_set,
-        is_training=True,
-        scale=args.scale,
-    )
-    val_dataset = SIG17_SR_Validation_Dataset(
-        root_dir=args.dataset_dir,
-        is_training=False,
-        crop=True,
-        crop_size=args.crop_size,
-        scale=args.scale,
-    )
+    train_dataset, val_dataset = build_datasets(args)
     train_loader = DataLoader(
         train_dataset,
         batch_size=args.batch_size,
@@ -344,7 +363,10 @@ def main():
         Batch size:      {}
         Loss function:   {}
         Learning rate:   {}
+        Train scene list: {}
+        Val scene list:   {}
         Training size:   {}
+        Validation size: {}
         Device:          {}
         Save dir:        {}
         '''.format(
@@ -358,7 +380,10 @@ def main():
             args.batch_size,
             args.loss_func,
             args.lr,
+            args.train_scene_list_file,
+            args.val_scene_list_file,
             len(train_loader.dataset),
+            len(val_loader.dataset),
             device.type,
             args.save_dir,
         )
