@@ -28,3 +28,8 @@ __pycache__/
 
 .DS_Store
 .vscode/
+
+# Local HDR-SR experiment outputs
+checkpoints_sr_*/
+results_sr_*/
+train_sr.py.backup_*
