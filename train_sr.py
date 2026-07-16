@@ -32,6 +32,13 @@ def get_args():
 
     parser.add_argument('--resume', type=str, default=None, help='load HDR-SR checkpoint from a .pth file')
     parser.add_argument('--no_cuda', action='store_true', default=False, help='disables CUDA training')
+    parser.add_argument(
+        '--device',
+        type=str,
+        default='auto',
+        choices=['auto', 'cuda', 'mps', 'cpu'],
+        help='device to use for training; auto prefers cuda, then mps, then cpu',
+    )
     parser.add_argument('--seed', type=int, default=443, metavar='S', help='random seed')
     parser.add_argument('--init_weights', action='store_true', default=False, help='initialize model weights')
     parser.add_argument('--loss_func', type=int, default=1, choices=[0, 1], help='0: L1MuLoss, 1: JointReconPerceptualLoss')
@@ -47,6 +54,33 @@ def get_args():
     parser.add_argument('--train_scene_list_file', type=str, default=None, help='optional training scene list file')
     parser.add_argument('--val_scene_list_file', type=str, default=None, help='optional validation scene list file from the training subset')
     return parser.parse_args()
+
+
+def resolve_device(args):
+    if args.no_cuda:
+        return torch.device('cpu')
+
+    if args.device == 'cuda':
+        if not torch.cuda.is_available():
+            raise RuntimeError('CUDA device was requested with --device cuda, but torch.cuda.is_available() is False.')
+        return torch.device('cuda')
+
+    if args.device == 'mps':
+        if not torch.backends.mps.is_available():
+            raise RuntimeError('MPS device was requested with --device mps, but torch.backends.mps.is_available() is False.')
+        return torch.device('mps')
+
+    if args.device == 'cpu':
+        return torch.device('cpu')
+
+    if args.device == 'auto':
+        if torch.cuda.is_available():
+            return torch.device('cuda')
+        if torch.backends.mps.is_available():
+            return torch.device('mps')
+        return torch.device('cpu')
+
+    raise ValueError('Unsupported device option: {}'.format(args.device))
 
 
 def assert_output_label_shape(output, label, stage):
@@ -301,8 +335,7 @@ def main():
         set_random_seed(args.seed)
     os.makedirs(args.save_dir, exist_ok=True)
 
-    use_cuda = not args.no_cuda and torch.cuda.is_available()
-    device = torch.device('cuda' if use_cuda else 'cpu')
+    device = resolve_device(args)
 
     model = HDRTransformerSR(
         embed_dim=60,
@@ -320,7 +353,7 @@ def main():
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, betas=(0.9, 0.999), eps=1e-08)
 
     model.to(device)
-    if torch.cuda.device_count() > 1 and use_cuda:
+    if torch.cuda.device_count() > 1 and device.type == 'cuda':
         model = nn.DataParallel(model)
 
     if args.resume:
@@ -341,14 +374,14 @@ def main():
         batch_size=args.batch_size,
         shuffle=True,
         num_workers=args.num_workers,
-        pin_memory=use_cuda,
+        pin_memory=device.type == 'cuda',
     )
     val_loader = DataLoader(
         val_dataset,
         batch_size=args.test_batch_size,
         shuffle=False,
         num_workers=args.num_workers,
-        pin_memory=use_cuda,
+        pin_memory=device.type == 'cuda',
     )
 
     print('''===> Start training HDR-Transformer-SR
