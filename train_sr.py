@@ -30,7 +30,13 @@ def get_args():
     parser.add_argument('--save_dir', type=str, default='./checkpoints_sr', help='directory for HDR-SR checkpoints')
     parser.add_argument('--num_workers', type=int, default=8, metavar='N', help='number of dataloader workers')
 
-    parser.add_argument('--resume', type=str, default=None, help='load HDR-SR checkpoint from a .pth file')
+    parser.add_argument('--resume', type=str, default=None, help='load a complete HDR-SR checkpoint and optimizer state')
+    parser.add_argument(
+        '--pretrained_backbone',
+        type=str,
+        default=None,
+        help='initialize the HDR-Transformer backbone from an original pretrained checkpoint',
+    )
     parser.add_argument('--no_cuda', action='store_true', default=False, help='disables CUDA training')
     parser.add_argument(
         '--device',
@@ -326,8 +332,116 @@ def build_datasets(args):
     return train_dataset, val_dataset
 
 
+
+def load_pretrained_backbone(model, checkpoint_path):
+    """Load compatible original HDR-Transformer parameters into HDRTransformerSR."""
+    if not os.path.isfile(checkpoint_path):
+        raise FileNotFoundError(
+            'No pretrained backbone checkpoint found at {}'.format(checkpoint_path)
+        )
+
+    print('===> Loading pretrained HDR backbone from: {}'.format(checkpoint_path))
+
+    checkpoint = torch.load(
+        checkpoint_path,
+        map_location='cpu',
+        weights_only=False,
+    )
+
+    if isinstance(checkpoint, dict) and 'state_dict' in checkpoint:
+        pretrained_state = checkpoint['state_dict']
+    elif isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+        pretrained_state = checkpoint['model_state_dict']
+    elif isinstance(checkpoint, dict) and 'model' in checkpoint:
+        pretrained_state = checkpoint['model']
+    elif isinstance(checkpoint, dict) and all(
+        torch.is_tensor(value) for value in checkpoint.values()
+    ):
+        pretrained_state = checkpoint
+    else:
+        raise RuntimeError(
+            'Unsupported pretrained checkpoint structure: {}'.format(
+                type(checkpoint)
+            )
+        )
+
+    normalized_state = {}
+    for key, value in pretrained_state.items():
+        normalized_key = key[7:] if key.startswith('module.') else key
+        normalized_state[normalized_key] = value
+
+    model_state = model.state_dict()
+    compatible_state = {}
+    skipped_keys = []
+
+    for key, value in normalized_state.items():
+        if key not in model_state:
+            skipped_keys.append((key, 'not present in HDRTransformerSR'))
+            continue
+
+        if model_state[key].shape != value.shape:
+            skipped_keys.append(
+                (
+                    key,
+                    'shape {} != {}'.format(
+                        tuple(value.shape),
+                        tuple(model_state[key].shape),
+                    ),
+                )
+            )
+            continue
+
+        compatible_state[key] = value
+
+    load_result = model.load_state_dict(compatible_state, strict=False)
+
+    # Only the newly introduced SR head may remain uninitialized.
+    unexpected_missing = [
+        key for key in load_result.missing_keys
+        if not key.startswith('sr_head.')
+    ]
+
+    if unexpected_missing:
+        raise RuntimeError(
+            'Pretrained backbone is missing required model parameters: {}'.format(
+                unexpected_missing
+            )
+        )
+
+    if load_result.unexpected_keys:
+        raise RuntimeError(
+            'Unexpected parameters while loading pretrained backbone: {}'.format(
+                load_result.unexpected_keys
+            )
+        )
+
+    print(
+        '===> Loaded {} compatible pretrained parameter tensors'.format(
+            len(compatible_state)
+        )
+    )
+    print(
+        '===> Newly initialized SR-head tensors: {}'.format(
+            [key for key in load_result.missing_keys if key.startswith('sr_head.')]
+        )
+    )
+
+    if skipped_keys:
+        print('===> Skipped pretrained tensors:')
+        for key, reason in skipped_keys:
+            print('     {}: {}'.format(key, reason))
+
+
 def main():
     args = get_args()
+
+    if args.resume and args.pretrained_backbone:
+        raise ValueError(
+            '--resume and --pretrained_backbone cannot be used together. '
+            'Use --resume for continuing HDR-SR training, or '
+            '--pretrained_backbone for a new pretrained initialization.'
+        )
+
     validate_lr_patch_size(args.train_lr_patch_size, args.window_size, 'Training')
     validate_lr_patch_size(args.val_lr_patch_size, args.window_size, 'Validation')
 
@@ -347,6 +461,9 @@ def main():
     )
     if args.init_weights:
         init_parameters(model)
+
+    if args.pretrained_backbone:
+        load_pretrained_backbone(model, args.pretrained_backbone)
 
     loss_dict = {0: L1MuLoss, 1: JointReconPerceptualLoss}
     criterion = loss_dict[args.loss_func]().to(device)
