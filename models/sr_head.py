@@ -30,9 +30,9 @@ class SRHead(nn.Module):
             nn.PixelShuffle(scale),
             # Project the upsampled feature map back to a 3-channel HDR image.
             nn.Conv2d(in_channels, 3, 3, 1, 1),
-            # Keep the output range aligned with the original HDRTransformer
-            # output head, which applies sigmoid after the last convolution.
-            nn.Sigmoid(),
+            # HDR radiance values must stay non-negative without being capped
+            # to the display-normalized [0, 1] range.
+            nn.Softplus(),
         )
 
     def forward(self, x):

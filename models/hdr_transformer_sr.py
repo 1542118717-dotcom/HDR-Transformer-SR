@@ -13,7 +13,8 @@ class HDRTransformerSR(HDRTransformer):
     This class reuses the original HDRTransformer feature extraction and
     Context-aware Transformer reconstruction backbone. The only architectural
     change is replacing the same-resolution ``conv_last + sigmoid`` image head
-    with ``SRHead``, which upsamples the reconstructed feature map by ``scale``.
+    with ``SRHead``, which upsamples the reconstructed feature map by ``scale``
+    and uses Softplus for non-negative, unbounded HDR radiance output.
     """
 
     def __init__(self, scale=2, *args, **kwargs):

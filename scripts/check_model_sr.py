@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
-"""Random tensor shape test for HDRTransformerSR."""
+"""Random tensor shape and HDR radiance range test for HDRTransformerSR."""
 
 import os
 import sys
 
 import torch
+import torch.nn as nn
 
 # Allow running this script directly from the repository root, e.g.:
 #   python scripts/check_model_sr.py
@@ -16,9 +17,11 @@ from models.hdr_transformer_sr import HDRTransformerSR
 
 
 def main():
-    x1 = torch.randn(1, 6, 128, 128)
-    x2 = torch.randn(1, 6, 128, 128)
-    x3 = torch.randn(1, 6, 128, 128)
+    torch.manual_seed(0)
+
+    x1 = torch.randn(1, 6, 64, 64)
+    x2 = torch.randn(1, 6, 64, 64)
+    x3 = torch.randn(1, 6, 64, 64)
 
     model = HDRTransformerSR(
         embed_dim=60,
@@ -30,6 +33,20 @@ def main():
     )
     model.eval()
 
+    final_activation = model.sr_head.body[-1]
+    if not isinstance(final_activation, nn.Softplus):
+        raise AssertionError(
+            "Expected HDRTransformerSR SR head final activation to be Softplus, "
+            "got {}".format(final_activation.__class__.__name__)
+        )
+
+    # Make the range check deterministic: with zero final-convolution weights
+    # and a positive bias, Softplus can produce values above 1, whereas a
+    # sigmoid head would remain capped at 1.
+    final_conv = model.sr_head.body[-2]
+    nn.init.zeros_(final_conv.weight)
+    nn.init.constant_(final_conv.bias, 2.0)
+
     with torch.no_grad():
         y = model(x1, x2, x3)
 
@@ -37,12 +54,26 @@ def main():
     print("x2 shape:", list(x2.shape))
     print("x3 shape:", list(x3.shape))
     print("output shape:", list(y.shape))
+    print("output min:", float(y.min()))
+    print("output max:", float(y.max()))
 
-    expected_shape = [1, 3, 256, 256]
+    expected_shape = [1, 3, 128, 128]
     if list(y.shape) != expected_shape:
-        raise AssertionError("Expected output shape {}, got {}".format(expected_shape, list(y.shape)))
+        raise AssertionError(
+            "Expected output shape {}, got {}".format(expected_shape, list(y.shape))
+        )
 
-    print("HDRTransformerSR shape test passed.")
+    if float(y.min()) < 0.0:
+        raise AssertionError(
+            "Expected non-negative HDR output, got minimum {}".format(float(y.min()))
+        )
+
+    if float(y.max()) <= 1.0:
+        raise AssertionError(
+            "Expected HDR output not to be capped at 1, got maximum {}".format(float(y.max()))
+        )
+
+    print("HDRTransformerSR shape and HDR radiance range test passed.")
 
 
 if __name__ == "__main__":
